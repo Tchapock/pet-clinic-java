@@ -1,0 +1,95 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'Maven3'
+        jdk 'JDK21'
+    }
+
+    environment {
+        AWS_REGION = 'us-east-2'
+        IMAGE_ECR_REPO = '440744242159.dkr.ecr.us-east-2.amazonaws.com/jenkins-ci'
+        ECR_REPO = '440744242159.dkr.ecr.us-east-2.amazonaws.com'
+        BRANCH_NAME = 'main'
+        GIT_CRED = 'credential-Jenkins'
+        GIT_PROJECT_URL = 'https://github.com/Tchapock/pet-clinic-java.git'
+        SONARQUBE_CRED = 'sonar-cred'
+        SONARQUBE_INSTALLATION = 'sonar-server'
+        APP_NAME = 'pet-clinic-java'
+        SCANNER_HOME = tool('sonar-scanner')
+    }
+
+    stages {
+
+        stage('Git Checkout') {
+            steps {
+                git branch: "${BRANCH_NAME}",
+                    credentialsId: "${GIT_CRED}",
+                    url: "${GIT_PROJECT_URL}"
+
+                sh 'ls -la'
+            }
+        }
+
+        stage('CodeScan') {
+            steps {
+                sh 'trivy fs --format table -o trivy_report.txt .'
+            }
+        }
+
+        stage('Start Postgres for Tests') {
+            steps {
+                sh 'docker compose down || true'
+                sh 'docker compose up -d postgres'
+            }
+        }
+
+        stage('Unit Test') {
+            steps {
+                sh 'mvn clean test'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE_INSTALLATION}") {
+                    sh """
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=${APP_NAME} \
+                        -Dsonar.projectName=${APP_NAME} \
+                        -Dsonar.java.binaries=target
+                    """
+                }
+            }
+        }
+
+        stage('dockerLogin') {
+            steps {
+                sh '''
+                    aws ecr get-login-password --region $AWS_REGION \
+                    | docker login --username AWS --password-stdin $ECR_REPO
+                '''
+            }
+        }
+
+        stage('dockerImageBuild') {
+            steps {
+                sh 'docker build -t jenkins-ci -f cicd/Dockerfile .'
+            }
+        }
+
+        stage('dockerImageTag') {
+            steps {
+                sh "docker tag jenkins-ci:latest $IMAGE_ECR_REPO:latest"
+                sh "docker tag jenkins-ci:latest $IMAGE_ECR_REPO:v1.$BUILD_NUMBER"
+            }
+        }
+
+        stage('pushImage') {
+            steps {
+                sh "docker push $IMAGE_ECR_REPO:latest"
+                sh "docker push $IMAGE_ECR_REPO:v1.$BUILD_NUMBER"
+            }
+        }
+    }
+}
